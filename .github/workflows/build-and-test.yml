@@ -1,0 +1,189 @@
+name: Build, test, and publish
+
+on:
+  workflow_call:
+    inputs:
+      fetch-depth:
+        required: true
+        type: number
+      pre-run-function:
+        required: false
+        type: string
+        default: |
+          tyras_pre_run ()
+          {
+            echo 'No pre-run.'
+          }
+      post-run-function:
+        required: false
+        type: string
+        default: |
+          tyras_post_run ()
+          {
+            TYRAS_GIT_ROOT="$(pwd)"
+            cd "$1"
+            cp "${TYRAS_GIT_ROOT}/LICENSE" ./LICENSE.txt
+            # Note - yarn doesn't have functionality to install package without saving it to package.json (!)
+            # So we use global install instead.
+            yarn global add "@jsdevtools/npm-publish@$(cat "${TYRAS_GIT_ROOT}/versions/npm-publish")"
+            npm-publish --dry-run --access public
+          }
+    secrets:
+      npm-publish-token:
+        required: false
+
+jobs:
+  construct_matrix_input:
+    runs-on: ubuntu-latest
+    name: Construct input for matrix job
+    outputs:
+      matrix_spec: ${{ steps.set_output.outputs.matrix_spec }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get all global and project-specific changes
+        id: changed-files-yaml
+        uses: tj-actions/changed-files@v38
+        with:
+          dir_names: true
+          dir_names_max_depth: 2
+          json: true
+          escape_json: false
+          quotepath: false
+          files_yaml: |
+            global:
+              - 'code/.c8rc.json'
+              - 'code/.eslintrc.*'
+              - 'code/.pretterrc'
+              - 'code/ava.config.mjs'
+              - 'code/tsconfig.*'
+              - '.codecov.yml'
+              - '.github/**'
+            code:
+              - 'code/*/**'
+              - '!code/*/**.md'
+
+      - name: Mark all components to be run
+        if: steps.changed-files-yaml.outputs.global_any_modified == 'true'
+        run: |
+          echo "$(find code -type d -maxdepth 1 -mindepth 1 -print0 | while IFS= read -r -d '' line; do jq -nM --arg dirname "$line" '$dirname'; done | jq -sMc)" > __output.txt
+
+      - name: Mark only affected components to be run
+        if: steps.changed-files-yaml.outputs.global_any_modified == 'false' && steps.changed-files-yaml.outputs.code_any_modified == 'true'
+        run: |
+          echo '${{ steps.changed-files-yaml.outputs.code_all_modified_files }}' > __output.txt
+      
+      - name: Save job output
+        id: set_output
+        run: |
+          echo "matrix_spec={\"dir\":$(cat __output.txt || echo '[]')}" > "${GITHUB_OUTPUT}"
+
+  build_and_test:
+    needs:
+      - construct_matrix_input
+    # Without this if, the job will fail on empty input
+    if: needs.construct_matrix_input.outputs.matrix_spec != ''
+    strategy:
+      matrix: ${{ fromJson(needs.construct_matrix_input.outputs.matrix_spec) }}
+    runs-on: ubuntu-latest
+    name: Build and test ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - id: prepare
+        name: Prepare ${{ matrix.dir }}
+        shell: bash
+        run: |
+          set -e
+
+          ${{ inputs.pre-run-function }}
+          tyras_pre_run '${{ matrix.dir }}'
+
+      - id: cache-dl
+        name: Cache downloaded Yarn packages
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-dl
+        with:
+          # Our install script uses this as yarn cache directory
+          path: .yarn
+          # We don't need OS in cache key, as we run yarn always via Docker (Alpine image)
+          key: ${{ env.cache-name }}-${{ matrix.dir }}-${{ hashFiles(format('{0}/yarn.lock', matrix.dir)) }}
+
+      - id: cache-modules
+        name: Cache installed Yarn packages
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-modules
+        with:
+          # Our install script uses this as yarn cache directory
+          path: ${{ matrix.dir }}/node_modules
+          # We don't need OS in cache key, as we run yarn always via Docker (Alpine image)
+          key: ${{ env.cache-name }}-${{ matrix.dir }}-${{ hashFiles(format('{0}/yarn.lock', matrix.dir)) }}
+      
+      - id: install-fresh
+        if: steps.cache-dl.outputs.cache-hit != 'true' || steps.cache-modules.outputs.cache-hit != 'true'
+        name: Download and install Yarn packages
+        shell: bash
+        run: |
+          set -e
+
+          ./scripts/install.sh '${{ matrix.dir }}' --frozen-lockfile
+
+      - id: install-existing
+        if: steps.cache-dl.outputs.cache-hit == 'true' && steps.cache-modules.outputs.cache-hit == 'true'
+        name: Setup target project
+        shell: bash
+        run: |
+          set -e
+
+          ./scripts/setup-project.sh '${{ matrix.dir }}' --frozen-lockfile
+      
+
+      - id: test
+        name: Test ${{ matrix.dir }}
+        shell: bash
+        run: |
+          set -e
+
+          ./scripts/test.sh '${{ matrix.dir }}' coverage
+
+      # Run build *after* tests - since tests no longer require transpiled JS to run
+      # We still want to run build to catch any TS error possibly lurking somewhere.
+      - id: compile
+        name: Compile ${{ matrix.dir }}
+        shell: bash
+        run: |
+          set -e
+
+          ./scripts/build.sh '${{ matrix.dir }}' ci
+
+      - id: lint
+        name: Lint ${{ matrix.dir }}
+        shell: bash
+        run: |
+          set -e
+
+          ./scripts/lint.sh '${{ matrix.dir }}'
+
+      - id: coverage
+        name: Upload coverage for '${{ matrix.dir }}'
+        uses: codecov/codecov-action@v3
+        with:
+          flags: ${{ matrix.dir }}
+          directory: ${{ matrix.dir }}
+
+      - id: finalize
+        name: Finalize ${{ matrix.dir }}
+        shell: bash
+        run: |
+          set -e
+
+          ${{ inputs.post-run-function }}
+          tyras_post_run '${{ matrix.dir }}'
+        env:
+          NPM_PUBLISH_TOKEN: ${{ secrets.npm-publish-token }}
