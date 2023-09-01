@@ -35,6 +35,7 @@
     "@ty-ras/data-frontend": "^2.0.1"
   },
   "devDependencies": {
+    "@ava/get-port": "2.0.0",
     "@babel/core": "7.22.11",
     "@babel/eslint-parser": "7.22.11",
     "@typescript-eslint/eslint-plugin": "6.4.1",

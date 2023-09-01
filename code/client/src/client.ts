@@ -12,8 +12,7 @@ import type * as stream from "node:stream";
 import * as errors from "./errors";
 
 /**
- * This function will create a {@link dataFE.CallHTTPEndpoint} callback which is locked on certain backend (scheme, hostname, etc).
- * It will throw whatever {@link URL} constructors throws if provided with invalid backend information.
+ * This function will create a {@link dataFE.CallHTTPEndpoint} callback using Node-native HTTP1 and HTTP2 -related modules.
  * @param callerArgs The {@link HTTPEndpointCallerArgs}: either base URL string, or structured information about the scheme, hostname, etc of the backend.
  * @param callerArgs.commonPathPrefix Privately deconstructed variable.
  * @param callerArgs.allowProtoProperty Privately deconstructed variable.
@@ -46,7 +45,7 @@ export const createCallHTTPEndpoint = ({
 export type HTTPEndpointCallerArgs = HTTPEndpointCallerOptions;
 
 /**
- * These options used to create callback thru {@link createCallHTTPEndpoint} should be either {@link HTTPEndpointCallerOptions1} for HTTP 1 protocol, or {@link HTTPEndpointCallerOptions2} for HTTP 2 protocol.
+ * These options used to create callback thru {@link createCallHTTPEndpoint} should be either {@link HTTPEndpointCallerOptions1} for HTTP1 protocol, or {@link HTTPEndpointCallerOptions2} for HTTP2 protocol.
  */
 export type HTTPEndpointCallerOptions =
   | HTTPEndpointCallerOptions1
@@ -69,7 +68,7 @@ export interface HTTPEndpointCallerOptionsBase {
 }
 
 /**
- * This is generic interface encapsulating pool-like behaviour for when using {@link http.Agent}, {@link https.Agent}, or {@link http2.ClientHttp2Session}.
+ * This is generic interface encapsulating pool-like behaviour for when using {@link HTTP1ConnectionAbstraction}, or {@link HTTP2ConnectionAbstraction}.
  */
 export interface HTTPConnectionUsageOptions<TConnection> {
   /**
@@ -87,8 +86,8 @@ export interface HTTPConnectionUsageOptions<TConnection> {
 }
 
 /**
- * This interface contains properties used in {@link createCallHTTPEndpoint} when HTTP 1 protocol is used, but no pool-like functionality for {@link http.Agent} is provided.
- * It will cause for single {@link http.Agent} to be used for all HTTP calls.
+ * This interface contains properties used in {@link createCallHTTPEndpoint} when HTTP1 protocol is used, but no pool-like functionality for {@link http.Agent} is provided.
+ * It will cause for single {@link HTTP1ConnectionAbstraction} to be used for all HTTP calls.
  * If {@link scheme} is `https`, then {@link https.Agent} will be used instead.
  */
 export interface HTTPEndpointCallerOptions1WithoutAgent {
@@ -117,7 +116,7 @@ export interface HTTPEndpointCallerOptions1WithoutAgent {
  */
 export type HTTPEndpointCallerOptions1 = HTTPEndpointCallerOptionsBase &
   (
-    | HTTPConnectionUsageOptions<http.Agent>
+    | HTTPConnectionUsageOptions<HTTP1ConnectionAbstraction>
     | HTTPEndpointCallerOptions1WithoutAgent
   ) & {
     /**
@@ -132,7 +131,7 @@ export type HTTPEndpointCallerOptions1 = HTTPEndpointCallerOptionsBase &
  */
 export interface HTTPEndpointCallerOptions2
   extends HTTPEndpointCallerOptionsBase,
-    HTTPConnectionUsageOptions<http2.ClientHttp2Session> {
+    HTTPConnectionUsageOptions<HTTP2ConnectionAbstraction> {
   /**
    * Forces the argument of {@link createCallHTTPEndpoint} to use HTTP1 connections.
    * This needs to be done explicitly, auto-upgrade scenarios are not trivial, see [discussion on GitHub](https://github.com/nodejs/node/issues/31759).
@@ -140,12 +139,30 @@ export interface HTTPEndpointCallerOptions2
   httpVersion: 2;
 }
 
+/**
+ * This type is connection abstraction for when HTTP1 protocol is used for calling REST API endpoints.
+ *
+ * Notice that for `https` secure connections, the {@link https.Agent} can be returned.
+ * Since it is subclass of {@link http.Agent}, it will work with this type.
+ */
+export type HTTP1ConnectionAbstraction = http.Agent;
+
+/**
+ * This type is connection abstraction for when HTTP2 protocol is used for calling REST API endpoints.
+ *
+ * Since only `request` function is needed from the {@link http2.ClientHttp2Session} by the code, this type narrows it down to that.
+ * This allows easier customizations e.g. if some additional parameters are needed to be passed to real {@link http2.ClientHttp2Session.request} method.
+ */
+export type HTTP2ConnectionAbstraction = {
+  [P in "request"]: http2.ClientHttp2Session[P];
+};
+
 const constructSingletonPool = ({
   scheme,
   host,
   port,
   rejectUnauthorized,
-}: HTTPEndpointCallerOptions1WithoutAgent): HTTPConnectionUsageOptions<http.Agent> => {
+}: HTTPEndpointCallerOptions1WithoutAgent): HTTPConnectionUsageOptions<HTTP1ConnectionAbstraction> => {
   const opts: http.AgentOptions = Object.assign(
     {
       host,
@@ -180,7 +197,7 @@ const getURLSearchParams = (query: Record<string, unknown>) =>
   ).toString();
 
 const callUsingHttp1 = (
-  pool: HTTPConnectionUsageOptions<http.Agent>,
+  pool: HTTPConnectionUsageOptions<HTTP1ConnectionAbstraction>,
   commonPathPrefix: string,
   reviver: JSONReviver,
 ): dataFE.CallHTTPEndpoint => {
@@ -200,7 +217,7 @@ const callUsingHttp1 = (
             {
               agent,
               method,
-              pathname,
+              path: `${pathname}${search}`,
               search,
               headers: getOutgoingHeaders(headers),
             },
@@ -229,7 +246,7 @@ const callUsingHttp1 = (
 };
 
 const callUsingHttp2 = (
-  pool: HTTPConnectionUsageOptions<http2.ClientHttp2Session>,
+  pool: HTTPConnectionUsageOptions<HTTP2ConnectionAbstraction>,
   commonPathPrefix: string,
   reviver: JSONReviver,
 ): dataFE.CallHTTPEndpoint => {
