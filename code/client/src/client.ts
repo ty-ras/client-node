@@ -8,6 +8,7 @@ import * as http from "node:http";
 import * as https from "node:https";
 import * as http2 from "node:http2";
 import * as url from "node:url";
+import type * as stream from "node:stream";
 import * as errors from "./errors";
 
 /**
@@ -24,20 +25,14 @@ export const createCallHTTPEndpoint = ({
   allowProtoProperty,
   ...callerArgs
 }: HTTPEndpointCallerArgs): dataFE.CallHTTPEndpoint => {
-  // If some garbage provided as args, then this will throw
-  const baseURLString = validateBaseURL(callerArgs);
   const reviver = data.getJSONParseReviver(allowProtoProperty === true);
 
   return callerArgs.httpVersion === 2
-    ? callUsingHttp2(
-        { acquire: callerArgs.acquire, release: callerArgs.release },
-        commonPathPrefix ?? "",
-        reviver,
-      )
+    ? callUsingHttp2(callerArgs, commonPathPrefix ?? "", reviver)
     : callUsingHttp1(
         "acquire" in callerArgs && "release" in callerArgs
-          ? { acquire: callerArgs.acquire, release: callerArgs.release }
-          : {},
+          ? callerArgs
+          : constructSingletonPool(callerArgs),
         commonPathPrefix ?? "",
         reviver,
       );
@@ -50,25 +45,53 @@ export const createCallHTTPEndpoint = ({
  */
 export type HTTPEndpointCallerArgs = HTTPEndpointCallerOptions;
 
+/**
+ * These options used to create callback thru {@link createCallHTTPEndpoint} should be either {@link HTTPEndpointCallerOptions1} for HTTP 1 protocol, or {@link HTTPEndpointCallerOptions2} for HTTP 2 protocol.
+ */
 export type HTTPEndpointCallerOptions =
   | HTTPEndpointCallerOptions1
   | HTTPEndpointCallerOptions2;
 
+/**
+ * This interface contains properties common for both {@link HTTPEndpointCallerOptions1} and {@link HTTPEndpointCallerOptions2}.
+ */
 export interface HTTPEndpointCallerOptionsBase {
   /**
    * If set to `true`, will NOT strip the `__proto__` properties of the result.
    */
   allowProtoProperty?: boolean;
 
+  /**
+   * The optional path prefix for backend HTTP endpoints.
+   * If provided, typically should include the last `/` character - the given URL paths will be concatenated directly after this without putting any logic in concatenation.
+   */
   commonPathPrefix?: string;
 }
 
+/**
+ * This is generic interface encapsulating pool-like behaviour for when using {@link http.Agent}, {@link https.Agent}, or {@link http2.ClientHttp2Session}.
+ */
 export interface HTTPConnectionUsageOptions<TConnection> {
+  /**
+   * Should asynchronously acquire the connection abstraction to be used in single HTTP call.
+   * @returns The instance of connection abstraction for HTTP calls.
+   */
   acquire: () => Promise<TConnection>;
+
+  /**
+   * Should asynchronously mark the given connection as free to be used in subsequent {@link acquire} calls.
+   * @param connection The connection abstraction returned by {@link acquire}.
+   * @returns Asynchronously returns nothing.
+   */
   release: (connection: TConnection) => Promise<void>;
 }
 
-export interface HTTPEndpointCallerOptionsWithoutAgent {
+/**
+ * This interface contains properties used in {@link createCallHTTPEndpoint} when HTTP 1 protocol is used, but no pool-like functionality for {@link http.Agent} is provided.
+ * It will cause for single {@link http.Agent} to be used for all HTTP calls.
+ * If {@link scheme} is `https`, then {@link https.Agent} will be used instead.
+ */
+export interface HTTPEndpointCallerOptions1WithoutAgent {
   /**
    * Which scheme should be used for URL.
    * Typically either `http` or `https`.
@@ -84,19 +107,18 @@ export interface HTTPEndpointCallerOptionsWithoutAgent {
   port?: number;
 
   /**
-   * The optional path prefix for backend HTTP endpoints.
-   * If provided, typically should include the last `/` character - the given URL paths will be concatenated directly after this without putting any logic in concatenation.
+   * Set this to `true` in order to accept secure connections with invalid (e.g. self-signed) certificate.
    */
-  path?: string;
+  rejectUnauthorized?: boolean;
 }
 
 /**
- * This type is the structured version of URL string passed to {@link createCallHTTPEndpoint}, extending {@link HTTPEndpointCallerOptionsBase} and using HTTP1 protocol.
+ * This type is used in {@link createCallHTTPEndpoint} when using HTTP1 protocol.
  */
 export type HTTPEndpointCallerOptions1 = HTTPEndpointCallerOptionsBase &
   (
     | HTTPConnectionUsageOptions<http.Agent>
-    | HTTPEndpointCallerOptionsWithoutAgent
+    | HTTPEndpointCallerOptions1WithoutAgent
   ) & {
     /**
      * Forces the argument of {@link createCallHTTPEndpoint} to use HTTP1 connections.
@@ -106,7 +128,7 @@ export type HTTPEndpointCallerOptions1 = HTTPEndpointCallerOptionsBase &
   };
 
 /**
- * This type is the structured version of URL string passed to {@link createCallHTTPEndpoint}, extending {@link HTTPEndpointCallerOptionsBase} and using HTTP2 protocol.
+ * This type is used in {@link createCallHTTPEndpoint} when using HTTP2 protocol.
  */
 export interface HTTPEndpointCallerOptions2
   extends HTTPEndpointCallerOptionsBase,
@@ -118,24 +140,32 @@ export interface HTTPEndpointCallerOptions2
   httpVersion: 2;
 }
 
-/**
- * This is exported for the tests only - it is not exported via index.ts
- * @param args The {@link HTTPEndpointCallerArgs}.
- * @returns The constructed URL string.
- */
-export const constructDummyPool = (
-  args: HTTPEndpointCallerOptionsWithoutAgent,
-) => {
-  const baseURLString =
-    typeof args === "string"
-      ? args
-      : `${args.scheme}://${args.host}${"port" in args ? `:${args.port}` : ""}${
-          args.path ?? ""
-        }`;
-  // Validate by trying to construct URL object. Will throw on invalid things.
-  new url.URL(baseURLString);
+const constructSingletonPool = ({
+  scheme,
+  host,
+  port,
+  rejectUnauthorized,
+}: HTTPEndpointCallerOptions1WithoutAgent): HTTPConnectionUsageOptions<http.Agent> => {
+  const opts: http.AgentOptions = Object.assign(
+    {
+      host,
+    },
+    port === undefined ? {} : { port },
+  );
 
-  return baseURLString;
+  const agent =
+    scheme === "https"
+      ? new https.Agent({
+          ...opts,
+          rejectUnauthorized,
+        })
+      : new http.Agent(opts);
+
+  return {
+    acquire: () => Promise.resolve(agent),
+    // Release is no-op
+    release: () => Promise.resolve(),
+  };
 };
 
 const getURLSearchParams = (query: Record<string, unknown>) =>
@@ -151,20 +181,15 @@ const getURLSearchParams = (query: Record<string, unknown>) =>
 
 const callUsingHttp1 = (
   pool: HTTPConnectionUsageOptions<http.Agent>,
-  baseURLString: string,
-  reviver: ReturnType<typeof data.getJSONParseReviver>,
+  commonPathPrefix: string,
+  reviver: JSONReviver,
 ): dataFE.CallHTTPEndpoint => {
-  // eslint-disable-next-line sonarjs/cognitive-complexity
   return async ({ headers, url, method, query, ...args }) => {
-    const body = "body" in args ? JSON.stringify(args.body) : undefined;
-
-    const urlObject = new URL(`${baseURLString}${url}`);
-    if (urlObject.search.length > 0 || urlObject.hash.length > 0) {
-      throw new errors.InvalidPathnameError(url);
-    }
-    if (query) {
-      urlObject.search = getURLSearchParams(query);
-    }
+    const { pathname, search } = constructURLObject(
+      commonPathPrefix,
+      url,
+      query,
+    );
     // If rejectUnauthorized is specified, we must construct separate https.Agent.
     // Do it per request to avoid possible congestion.
     const agent = await pool.acquire();
@@ -175,51 +200,27 @@ const callUsingHttp1 = (
             {
               agent,
               method,
-              href: urlObject.href,
+              pathname,
+              search,
               headers: getOutgoingHeaders(headers),
             },
             (resp) => {
               resp.setEncoding("utf8");
-              let data: string | undefined;
-              const headers = resp.headers;
-              const statusCode = resp.statusCode;
-
-              // A chunk of data has been received.
-              resp.on("data", (chunk: string) => {
-                if (data === undefined) {
-                  data = chunk;
-                } else {
-                  data += chunk;
-                }
-              });
-
-              resp.on("end", () => {
-                if (
-                  statusCode === undefined ||
-                  (statusCode !== 200 && statusCode !== 204)
-                ) {
-                  reject(new errors.Non2xxStatusCodeError(statusCode ?? -1));
-                } else {
-                  resolve({
-                    headers,
-                    body:
-                      data === undefined
-                        ? undefined
-                        : JSON.parse(data, reviver),
-                  });
-                }
-              });
+              handleResolvingOfResponse(
+                reviver,
+                resp,
+                resolve,
+                reject,
+                () => resp.statusCode,
+                resp.headers,
+              );
             },
           )
           .on("error", (err) => {
             reject(err);
           });
 
-        if (body !== undefined) {
-          writeable.write(body);
-        }
-
-        writeable.end();
+        writeBodyAndEnd(writeable, args);
       });
     } finally {
       await pool.release(agent);
@@ -229,27 +230,21 @@ const callUsingHttp1 = (
 
 const callUsingHttp2 = (
   pool: HTTPConnectionUsageOptions<http2.ClientHttp2Session>,
-  baseURLString: string,
-  reviver: ReturnType<typeof data.getJSONParseReviver>,
+  commonPathPrefix: string,
+  reviver: JSONReviver,
 ): dataFE.CallHTTPEndpoint => {
   return async ({ headers, url, method, query, ...args }) => {
-    const body = "body" in args ? JSON.stringify(args.body) : undefined;
-
-    const urlObject = new URL(`${baseURLString}${url}`);
-    if (urlObject.search.length > 0 || urlObject.hash.length > 0) {
-      throw new errors.InvalidPathnameError(url);
-    }
-    if (query) {
-      urlObject.search = getURLSearchParams(query);
-    }
+    const { pathname, search } = constructURLObject(
+      commonPathPrefix,
+      url,
+      query,
+    );
     const session = await pool.acquire();
     try {
       const request = session.request({
         ...getOutgoingHeaders(headers),
-        // [http2.constants.HTTP2_HEADER_SCHEME]: "https",
         [http2.constants.HTTP2_HEADER_METHOD]: method,
-        [http2.constants
-          .HTTP2_HEADER_PATH]: `${urlObject.pathname}${urlObject.search}`,
+        [http2.constants.HTTP2_HEADER_PATH]: `${pathname}${search}`,
       });
       request.setEncoding("utf8");
 
@@ -257,65 +252,32 @@ const callUsingHttp2 = (
       request.on("response", (hdrs) => {
         incomingHeaders = hdrs;
       });
-      let data: string | undefined;
-      request.on("data", (chunk) => {
-        if (data === undefined) {
-          data = chunk as string;
-        } else {
-          data += chunk;
-        }
-      });
       return await new Promise((resolve, reject) => {
-        let data: string | undefined;
-        request.on("data", (chunk) => {
-          if (data === undefined) {
-            data = chunk as string;
-          } else {
-            data += chunk;
-          }
-        });
-        request.on("end", () => {
-          const statusCodeVal =
-            incomingHeaders[http2.constants.HTTP2_HEADER_STATUS];
-          const statusCode =
-            typeof statusCodeVal === "number" ? statusCodeVal : undefined;
-          if (
-            statusCode === undefined ||
-            (statusCode !== 200 && statusCode !== 204)
-          ) {
-            reject(new errors.Non2xxStatusCodeError(statusCode ?? -1));
-          } else {
-            resolve({
-              headers: Object.entries(incomingHeaders).reduce<
-                typeof incomingHeaders
-              >(
-                (acc, [k, v]) =>
-                  typeof k == "symbol" ||
-                  k === http2.constants.HTTP2_HEADER_STATUS
-                    ? acc
-                    : ((acc[k] = v), acc),
-                {},
-              ),
-              body: data === undefined ? undefined : JSON.parse(data, reviver),
-            });
-          }
-        });
+        handleResolvingOfResponse(
+          reviver,
+          request,
+          resolve,
+          reject,
+          () => {
+            const statusCodeVal =
+              incomingHeaders[http2.constants.HTTP2_HEADER_STATUS];
+            return typeof statusCodeVal === "number"
+              ? statusCodeVal
+              : undefined;
+          },
+          () => data.omit(incomingHeaders, http2.constants.HTTP2_HEADER_STATUS),
+        );
         request.on("error", (error) => {
           reject(error);
         });
 
-        if (body !== undefined) {
-          request.write(body);
-        }
-        request.end();
+        writeBodyAndEnd(request, args);
       });
     } finally {
       await pool.release(session);
     }
   };
 };
-
-export type Optionalize<T> = { [P in keyof T]?: T[P] };
 
 const getOutgoingHeaders = (headers: Record<string, unknown> | undefined) =>
   headers === undefined
@@ -328,3 +290,73 @@ const getOutgoingHeader = (header: unknown): http.OutgoingHttpHeader =>
     : Array.isArray(header)
     ? header.filter((v) => v !== undefined).map((v) => `${v}`)
     : `${header}`;
+
+const constructURLObject = (
+  commonPathPrefix: string,
+  pathname: string,
+  query: Record<string, unknown> | undefined,
+): { pathname: string; search: string } => {
+  const base = "http://__base__";
+  const urlObject = new URL(`${commonPathPrefix}${pathname}`, base);
+  if (
+    urlObject.origin !== base ||
+    pathname.startsWith(base) ||
+    urlObject.search.length > 0 ||
+    urlObject.hash.length > 0
+  ) {
+    throw new errors.InvalidPathnameError(pathname);
+  }
+  if (query) {
+    urlObject.search = getURLSearchParams(query);
+  }
+
+  return {
+    pathname: urlObject.pathname,
+    search: urlObject.search,
+  };
+};
+
+const writeBodyAndEnd = (
+  writable: stream.Writable,
+  args: { body?: unknown },
+) => {
+  const body = "body" in args ? JSON.stringify(args.body) : undefined;
+  if (body !== undefined) {
+    writable.write(body);
+  }
+  writable.end();
+};
+
+const handleResolvingOfResponse = (
+  reviver: JSONReviver,
+  source: stream.Stream,
+  resolve: (result: dataFE.HTTPInvocationResult) => void,
+  reject: (error: unknown) => void,
+  getStatusCode: () => number | undefined,
+  getHeaders: http.IncomingHttpHeaders | (() => http.IncomingHttpHeaders),
+) => {
+  let data: string | undefined;
+  source.on("data", (chunk: string) => {
+    if (data === undefined) {
+      data = chunk;
+    } else {
+      data += chunk;
+    }
+  });
+  source.on("end", () => {
+    const statusCode = getStatusCode();
+    if (
+      statusCode === undefined ||
+      (statusCode !== 200 && statusCode !== 204)
+    ) {
+      reject(new errors.Non2xxStatusCodeError(statusCode ?? -1));
+    } else {
+      resolve({
+        headers: typeof getHeaders === "function" ? getHeaders() : getHeaders,
+        body: data === undefined ? undefined : JSON.parse(data, reviver),
+      });
+    }
+  });
+};
+
+type JSONReviver = ReturnType<typeof data.getJSONParseReviver>;
