@@ -218,7 +218,6 @@ const callUsingHttp1 = (
               agent,
               method,
               path: `${pathname}${search}`,
-              search,
               headers: getOutgoingHeaders(headers),
             },
             (resp) => {
@@ -282,7 +281,7 @@ const callUsingHttp2 = (
               ? statusCodeVal
               : undefined;
           },
-          () => data.omit(incomingHeaders, http2.constants.HTTP2_HEADER_STATUS),
+          () => incomingHeaders,
         );
         request.on("error", (error) => {
           reject(error);
