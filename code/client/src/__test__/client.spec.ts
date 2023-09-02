@@ -163,10 +163,9 @@ test("Test HTTP 2 protocol aspects", testHTTPProtocolAspects, 2);
 test("Test that using full URL is detected and exception thrown", async (c) => {
   c.plan(2);
   const host = "localhost";
-  const port = await getPort();
   const callback = spec.createCallHTTPEndpoint({
     host,
-    port,
+    port: 1,
     scheme: "http",
   });
   await c.throwsAsync(
