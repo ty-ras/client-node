@@ -216,6 +216,7 @@ const callUsingHttp1 = (
           .request(
             {
               agent,
+              protocol: agent instanceof https.Agent ? "https:" : "http:",
               method,
               path: `${pathname}${search}`,
               headers: getOutgoingHeaders(headers),
@@ -283,7 +284,10 @@ const callUsingHttp2 = (
           },
           () => incomingHeaders,
         );
+
+        // Couldn't figure out how to produce this scenario in test bed, hence the C8 ignore
         request.on("error", (error) => {
+          /* c8 ignore next */
           reject(error);
         });
 
@@ -309,26 +313,17 @@ const getOutgoingHeader = (header: unknown): http.OutgoingHttpHeader =>
 
 const constructURLObject = (
   commonPathPrefix: string,
-  pathname: string,
+  path: string,
   query: Record<string, unknown> | undefined,
 ): { pathname: string; search: string } => {
-  const base = "http://__base__";
-  const urlObject = new URL(`${commonPathPrefix}${pathname}`, base);
-  if (
-    urlObject.origin !== base ||
-    pathname.startsWith(base) ||
-    urlObject.search.length > 0 ||
-    urlObject.hash.length > 0
-  ) {
-    throw new errors.InvalidPathnameError(pathname);
-  }
-  if (query) {
-    urlObject.search = getURLSearchParams(query);
-  }
-
+  const pathname = `${commonPathPrefix}${path}`.replaceAll(
+    /\?|#/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  const search = getURLSearchParams(query ?? {});
   return {
-    pathname: urlObject.pathname,
-    search: urlObject.search,
+    pathname: pathname,
+    search: search.length > 0 ? `?${search}` : "",
   };
 };
 
@@ -356,15 +351,14 @@ const handleResolvingOfResponse = (
     if (data === undefined) {
       data = chunk;
     } else {
+      /* c8 ignore next 3 */
+      // Looks like on localhost even sending very large data bodies does not cause this to happen, hence C8 ignore.
       data += chunk;
     }
   });
   source.on("end", () => {
     const statusCode = getStatusCode();
-    if (
-      statusCode === undefined ||
-      (statusCode !== 200 && statusCode !== 204)
-    ) {
+    if (statusCode === undefined || statusCode < 200 || statusCode >= 300) {
       reject(new errors.Non2xxStatusCodeError(statusCode ?? -1));
     } else {
       resolve({

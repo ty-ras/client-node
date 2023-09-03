@@ -3,20 +3,6 @@
  */
 
 /**
- * This error is thrown when the URL path string contains something else than just that.
- * Notice that only type information about this is exported, not the class itself.
- */
-export class InvalidPathnameError extends Error {
-  /**
-   * Creates new instance of this error with given parameters.
-   * @param pathname The pathname given that caused this error.
-   */
-  public constructor(public readonly pathname: string) {
-    super(`Invalid pathname supplied: "${pathname}".`);
-  }
-}
-
-/**
  * This error is thrown when the backend returns something else than `200` or `204` as status code.
  * Notice that only type information about this is exported, not the class itself.
  */
@@ -29,15 +15,6 @@ export class Non2xxStatusCodeError extends Error {
     super(`Status code ${statusCode} was returned.`);
   }
 }
-
-/**
- * Helper function to test whether some error is {@link InvalidPathnameError}.
- * @param error The {@link Error} to test.
- * @returns `true` if given `error` is {@link InvalidPathnameError}, `false` otherwise.
- */
-export const isInvalidPathnameError = (
-  error: Error,
-): error is InvalidPathnameError => error instanceof InvalidPathnameError;
 
 /**
  * Helper function to test whether some error is {@link Non2xxStatusCodeError}.
