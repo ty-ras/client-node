@@ -177,7 +177,7 @@ jobs:
         run: |
           set -e
 
-          echo "::set-output name=flag::$(basename '{{ matrix.dir }}')"
+          echo "::set-output name=flag::$(basename '${{ matrix.dir }}')"
 
       - id: coverage
         name: Upload coverage for '${{ matrix.dir }}'
