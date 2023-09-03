@@ -177,7 +177,7 @@ jobs:
         run: |
           set -e
 
-          echo "::set-output name=flag::$(basename '${{ matrix.dir }}')"
+          echo "flag=$(basename '${{ matrix.dir }}')" >> $GITHUB_OUTPUT
 
       - id: coverage
         name: Upload coverage for '${{ matrix.dir }}'
