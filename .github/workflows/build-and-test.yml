@@ -173,7 +173,7 @@ jobs:
       # CodeCov does not accept flags with '/' in them
       - id: prepare-coverage
         name: Prepare coverage
-        shalle: bash
+        shell: bash
         run: |
           set -e
 
