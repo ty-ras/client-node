@@ -170,11 +170,20 @@ jobs:
 
           ./scripts/lint.sh '${{ matrix.dir }}'
 
+      # CodeCov does not accept flags with '/' in them
+      - id: prepare-coverage
+        name: Prepare coverage
+        shalle: bash
+        run: |
+          set -e
+
+          echo "::set-output name=flag::$(basename '{{ matrix.dir }}')"
+
       - id: coverage
         name: Upload coverage for '${{ matrix.dir }}'
         uses: codecov/codecov-action@v3
         with:
-          flags: ${{ matrix.dir }}
+          flags: ${{ steps.prepare-coverage.outputs.flag }}
           directory: ${{ matrix.dir }}
 
       - id: finalize
