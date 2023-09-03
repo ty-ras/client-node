@@ -10,6 +10,7 @@ import * as http2 from "node:http2";
 import * as url from "node:url";
 import type * as stream from "node:stream";
 import * as errors from "./errors";
+import * as encoding from "./encoding";
 
 /**
  * This function will create a {@link dataFE.CallHTTPEndpoint} callback using Node-native HTTP1 and HTTP2 -related modules.
@@ -115,6 +116,7 @@ export interface HTTPEndpointCallerOptions1WithoutAgent {
  * This type is used in {@link createCallHTTPEndpoint} when using HTTP1 protocol.
  */
 export type HTTPEndpointCallerOptions1 = HTTPEndpointCallerOptionsBase &
+  encoding.HTTPEncodingOptions1 &
   (
     | HTTPConnectionUsageOptions<HTTP1ConnectionAbstraction>
     | HTTPEndpointCallerOptions1WithoutAgent
@@ -131,6 +133,7 @@ export type HTTPEndpointCallerOptions1 = HTTPEndpointCallerOptionsBase &
  */
 export interface HTTPEndpointCallerOptions2
   extends HTTPEndpointCallerOptionsBase,
+    encoding.HTTPEncodingOptions2,
     HTTPConnectionUsageOptions<HTTP2ConnectionAbstraction> {
   /**
    * Forces the argument of {@link createCallHTTPEndpoint} to use HTTP1 connections.
@@ -197,10 +200,22 @@ const getURLSearchParams = (query: Record<string, unknown>) =>
   ).toString();
 
 const callUsingHttp1 = (
-  pool: HTTPConnectionUsageOptions<HTTP1ConnectionAbstraction>,
+  {
+    acquire,
+    release,
+    encodingForReading: _encodingForReading,
+    encodingForWriting: _encodingForWriting,
+  }: HTTPConnectionUsageOptions<HTTP1ConnectionAbstraction> &
+    encoding.HTTPEncodingOptions1,
   commonPathPrefix: string,
   reviver: JSONReviver,
 ): dataFE.CallHTTPEndpoint => {
+  const encodingForReading =
+    _encodingForReading ??
+    encoding.DEFAULT_HTTP_ENCODING_OPTIONS.encodingForReading;
+  const encodingForWriting =
+    _encodingForWriting ??
+    encoding.DEFAULT_HTTP_ENCODING_OPTIONS.encodingForWriting;
   return async ({ headers, url, method, query, ...args }) => {
     const { pathname, search } = constructURLObject(
       commonPathPrefix,
@@ -209,92 +224,121 @@ const callUsingHttp1 = (
     );
     // If rejectUnauthorized is specified, we must construct separate https.Agent.
     // Do it per request to avoid possible congestion.
-    const agent = await pool.acquire();
+    const agent = await acquire();
     try {
+      const outgoingHeaders = getOutgoingHeaders(headers);
       return await new Promise((resolve, reject) => {
-        const writeable = http
-          .request(
-            {
-              agent,
-              protocol: agent instanceof https.Agent ? "https:" : "http:",
-              method,
-              path: `${pathname}${search}`,
-              headers: getOutgoingHeaders(headers),
-            },
-            (resp) => {
-              resp.setEncoding("utf8");
-              handleResolvingOfResponse(
-                reviver,
-                resp,
-                resolve,
-                reject,
-                () => resp.statusCode,
-                resp.headers,
-              );
-            },
-          )
-          .on("error", (err) => {
-            reject(err);
-          });
+        try {
+          const writeable = http
+            .request(
+              {
+                agent,
+                protocol: agent instanceof https.Agent ? "https:" : "http:",
+                method,
+                path: `${pathname}${search}`,
+                headers: outgoingHeaders,
+              },
+              (resp) => {
+                setReadableEncoding(resp, encodingForReading, resp.headers);
+                handleResolvingOfResponse(
+                  reviver,
+                  resp,
+                  resolve,
+                  reject,
+                  () => resp.statusCode,
+                  resp.headers,
+                );
+              },
+            )
+            .on("error", (err) => {
+              reject(err);
+            });
 
-        writeBodyAndEnd(writeable, args);
+          writeBodyAndEnd(
+            writeable,
+            args,
+            encodingForWriting,
+            outgoingHeaders ?? {},
+          );
+        } catch (e) {
+          /* c8 ignore next 2 */
+          reject(e);
+        }
       });
     } finally {
-      await pool.release(agent);
+      await release(agent);
     }
   };
 };
 
 const callUsingHttp2 = (
-  pool: HTTPConnectionUsageOptions<HTTP2ConnectionAbstraction>,
+  {
+    acquire,
+    release,
+    encodingForReading: _encodingForReading,
+    encodingForWriting: _encodingForWriting,
+  }: HTTPConnectionUsageOptions<HTTP2ConnectionAbstraction> &
+    encoding.HTTPEncodingOptions2,
   commonPathPrefix: string,
   reviver: JSONReviver,
 ): dataFE.CallHTTPEndpoint => {
+  const encodingForReading =
+    _encodingForReading ??
+    encoding.DEFAULT_HTTP_ENCODING_OPTIONS.encodingForReading;
+  const encodingForWriting =
+    _encodingForWriting ??
+    encoding.DEFAULT_HTTP_ENCODING_OPTIONS.encodingForWriting;
   return async ({ headers, url, method, query, ...args }) => {
     const { pathname, search } = constructURLObject(
       commonPathPrefix,
       url,
       query,
     );
-    const session = await pool.acquire();
+    const session = await acquire();
     try {
-      const request = session.request({
+      const outgoingHeaders = {
         ...getOutgoingHeaders(headers),
         [http2.constants.HTTP2_HEADER_METHOD]: method,
         [http2.constants.HTTP2_HEADER_PATH]: `${pathname}${search}`,
-      });
-      request.setEncoding("utf8");
+      };
+      const request = session.request(outgoingHeaders);
 
       let incomingHeaders: http2.IncomingHttpHeaders = {};
       request.on("response", (hdrs) => {
         incomingHeaders = hdrs;
+        setReadableEncoding(request, encodingForReading, hdrs);
       });
       return await new Promise((resolve, reject) => {
-        handleResolvingOfResponse(
-          reviver,
-          request,
-          resolve,
-          reject,
-          () => {
-            const statusCodeVal =
-              incomingHeaders[http2.constants.HTTP2_HEADER_STATUS];
-            return typeof statusCodeVal === "number"
-              ? statusCodeVal
-              : undefined;
-          },
-          () => incomingHeaders,
-        );
+        try {
+          handleResolvingOfResponse(
+            reviver,
+            request,
+            resolve,
+            reject,
+            () => {
+              const statusCodeVal =
+                incomingHeaders[http2.constants.HTTP2_HEADER_STATUS];
+              return typeof statusCodeVal === "number"
+                ? statusCodeVal
+                : undefined;
+            },
+            () => incomingHeaders,
+          );
 
-        // Couldn't figure out how to produce this scenario in test bed, hence the C8 ignore
-        request.on("error", (error) => {
-          /* c8 ignore next */
-          reject(error);
-        });
+          // Couldn't figure out how to produce this scenario in test bed, hence the C8 ignore
+          request.on("error", (error) => {
+            /* c8 ignore next */
+            reject(error);
+          });
 
-        writeBodyAndEnd(request, args);
+          writeBodyAndEnd(request, args, encodingForWriting, outgoingHeaders);
+        } catch (e) {
+          /* c8 ignore next 2 */
+          reject(e);
+        }
       });
     } finally {
-      await pool.release(session);
+      await release(session);
     }
   };
 };
@@ -327,13 +371,34 @@ const constructURLObject = (
   };
 };
 
-const writeBodyAndEnd = (
+const writeBodyAndEnd = <THeaders extends http.OutgoingHttpHeaders>(
   writable: stream.Writable,
   args: { body?: unknown },
+  encodingForWriting: encoding.HTTPEncodingFunctionality<THeaders>,
+  headers: THeaders,
 ) => {
   const body = "body" in args ? JSON.stringify(args.body) : undefined;
   if (body !== undefined) {
-    writable.write(body);
+    // Notice that despite what typings claim, the 'setDefaultEncoding' method will not be present on HTTP1 client request!
+    // Therefore, just use write overload, since we call write only once anyway.
+    try {
+      writable.write(
+        body,
+        typeof encodingForWriting === "function"
+          ? encodingForWriting(headers)
+          : encodingForWriting,
+      );
+    } catch (e) {
+      /* c8 ignore next 9 */
+      // Adding to C8 ignore because can't test since Node crashes...
+      // No idea why 'code' isn't exposed in typings...
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
+      if (e instanceof Error && (e as any).code === "ERR_UNKNOWN_ENCODING") {
+        writable.write(body, encoding.DEFAULT_ENCODING);
+      } else {
+        throw e;
+      }
+    }
   }
   writable.end();
 };
@@ -370,3 +435,22 @@ const handleResolvingOfResponse = (
 };
 
 type JSONReviver = ReturnType<typeof data.getJSONParseReviver>;
+
+const setReadableEncoding = <THeaders extends http.IncomingHttpHeaders>(
+  readable: stream.Readable,
+  encodingForReading: encoding.HTTPEncodingFunctionality<THeaders>,
+  headers: THeaders,
+) => {
+  try {
+    readable.setEncoding(
+      typeof encodingForReading === "function"
+        ? encodingForReading(headers)
+        : encodingForReading,
+    );
+  } catch {
+    /* c8 ignore next 4 */
+    // Can't test since Node crashes on this or when doing it for writable.
+    // Probably some garbage returned from the function / value
+    readable.setEncoding(encoding.DEFAULT_ENCODING);
+  }
+};

@@ -11,6 +11,7 @@ import type * as net from "node:net";
 
 import * as spec from "../client";
 import * as errors from "../errors";
+import * as encoding from "../encoding";
 
 test("Verify that http1 non-pooling variant works", async (c) => {
   c.plan(2);
@@ -33,6 +34,7 @@ test("Verify that http1 non-pooling variant works", async (c) => {
     {
       method,
       url,
+      body: undefined,
       headers: getExpectedServerIncomingHeaders(1, {
         host,
         port,
@@ -84,6 +86,7 @@ const testSimpleUsecase = async (
     {
       method,
       url,
+      body: undefined,
       headers: getExpectedServerIncomingHeaders(httpVersion, {
         ...settings,
         method,
@@ -130,7 +133,7 @@ const testHTTPProtocolAspects = async (
     y: 2,
   };
   const body = {
-    theBody: "this",
+    theBody: "this is \u00e4",
   };
   const headers = {
     someCustomHeader: "someRandomValue",
@@ -144,6 +147,7 @@ const testHTTPProtocolAspects = async (
     {
       method,
       url: path,
+      body: JSON.stringify(body),
       headers: getExpectedServerIncomingHeaders(
         httpVersion,
         {
@@ -189,6 +193,7 @@ const testTrickyPathNames = async (
     {
       method,
       url,
+      body: undefined,
       headers: getExpectedServerIncomingHeaders(httpVersion, {
         ...settings,
         method,
@@ -275,9 +280,67 @@ test(
   2,
 );
 
+// const testBadEncodings = async (
+//   c: ExecutionContext,
+//   httpVersion: HTTPVersion,
+// ) => {
+//   const responseBody = "The body \u00f6";
+//   const { callback, capturedInfo, ...settings } = await prepareForTest(
+//     httpVersion,
+//     [JSON.stringify(responseBody)],
+//     {
+//       encodingForReading: "blaa" as BufferEncoding,
+//       encodingForWriting: "blee" as BufferEncoding,
+//     },
+//   );
+//   const method = "POST";
+//   const url = "/hello";
+//   const body = {
+//     theBody: "this is \u00e4",
+//   };
+//   const result = await callback({ method, url, body });
+//   c.deepEqual(capturedInfo, [
+//     {
+//       method,
+//       url,
+//       headers: getExpectedServerIncomingHeaders(
+//         httpVersion,
+//         {
+//           ...settings,
+//           method,
+//           path: url,
+//           scheme: "http",
+//         },
+//         {
+//           additionalHeaders: {},
+//           hasBody: true,
+//         },
+//       ),
+//     },
+//   ]);
+//   c.deepEqual(result, {
+//     body: responseBody,
+//     headers: getExpectedClientIncomingHeaders(httpVersion, 200),
+//   });
+// };
+
+// Unfortunately, both of these tests causes another instance of this error:
+// FATAL ERROR: v8::ToLocalChecked Empty MaybeLocal
+// test(
+//   "Test that bad encodings in HTTP1 are handled correctly",
+//   testBadEncodings,
+//   1,
+// );
+// test(
+//   "Test that bad encodings in HTTP2 are handled correctly",
+//   testBadEncodings,
+//   2,
+// );
+
 const prepareForTest = async (
   httpVersion: HTTPVersion,
   responses: PreparedServerRespones = [undefined],
+  encodingInfo: EncodingInfo = undefined,
 ) => {
   const host = "localhost";
   const port = await getPort();
@@ -292,7 +355,7 @@ const prepareForTest = async (
     host,
     port,
     capturedInfo,
-    ...createCallback(httpVersion, host, port),
+    ...createCallback(httpVersion, host, port, encodingInfo),
   };
 };
 
@@ -300,6 +363,7 @@ const createCallback = (
   httpVersion: HTTPVersion,
   host: string,
   port: number,
+  encodingInfo: EncodingInfo,
 ) => {
   const acquired: Array<
     spec.HTTP2ConnectionAbstraction | spec.HTTP1ConnectionAbstraction
@@ -310,6 +374,7 @@ const createCallback = (
   const callback = spec.createCallHTTPEndpoint(
     httpVersion === 2
       ? {
+          ...(encodingInfo ?? {}),
           httpVersion,
           acquire: () => {
             const connection = http2.connect(`http://${host}:${port}`);
@@ -329,6 +394,7 @@ const createCallback = (
           },
         }
       : {
+          ...(encodingInfo ?? {}),
           httpVersion,
           acquire: () => {
             const agent = new http.Agent({ host, port });
@@ -362,40 +428,56 @@ const createTrackingServerAndListen = async (
   host: string,
   port: number,
   responses: PreparedServerRespones,
+  // eslint-disable-next-line sonarjs/cognitive-complexity
 ) => {
   const capturedInfo: Array<{
     method: string | undefined;
     url: string | undefined;
     headers: Record<string, unknown>;
+    body: string | undefined;
   }> = [];
   let idx = 0;
   const handleResponse = (
     req: http.IncomingMessage | http2.Http2ServerRequest,
     res: http.ServerResponse | http2.Http2ServerResponse,
   ) => {
-    capturedInfo.push({
-      method: req.method,
-      url: req.url,
-      headers: req.headers,
+    let body: string | undefined;
+    req.on("data", (chunk: string | Uint8Array) => {
+      if (chunk instanceof Uint8Array) {
+        chunk = Buffer.from(chunk).toString(encoding.DEFAULT_ENCODING);
+      }
+      if (body === undefined) {
+        body = chunk;
+      } else {
+        body += chunk;
+      }
     });
-    const responseInfo = responses[idx++];
-    res.sendDate = false; // Makes life easier
-    let callEnd = true;
-    if (responseInfo === undefined) {
-      res.statusCode = 204;
-    } else if (typeof responseInfo === "string") {
-      res.statusCode = 200;
-      (res as stream.Writable).write(responseInfo);
-    } else if (typeof responseInfo === "number") {
-      res.statusCode = responseInfo;
-    } else {
-      responseInfo(req, res);
-      callEnd = false;
-    }
+    req.on("end", () => {
+      capturedInfo.push({
+        method: req.method,
+        url: req.url,
+        headers: req.headers,
+        body,
+      });
+      const responseInfo = responses[idx++];
+      res.sendDate = false; // Makes life easier
+      let callEnd = true;
+      if (responseInfo === undefined) {
+        res.statusCode = 204;
+      } else if (typeof responseInfo === "string") {
+        res.statusCode = 200;
+        (res as stream.Writable).write(responseInfo);
+      } else if (typeof responseInfo === "number") {
+        res.statusCode = responseInfo;
+      } else {
+        responseInfo(req, res);
+        callEnd = false;
+      }
 
-    if (callEnd) {
-      res.end();
-    }
+      if (callEnd) {
+        res.end();
+      }
+    });
   };
   const server =
     httpVersion === 2
@@ -471,3 +553,8 @@ type PreparedServerRespones = ReadonlyArray<
       res: http.ServerResponse | http2.Http2ServerResponse,
     ) => void)
 >;
+
+type EncodingInfo =
+  | encoding.HTTPEncodingOptions1
+  | encoding.HTTPEncodingOptions2
+  | undefined;
