@@ -13,6 +13,38 @@ import * as spec from "../client";
 import * as errors from "../errors";
 import * as encoding from "../encoding";
 
+test("Verify that http1 raw string variant works", async (c) => {
+  c.plan(2);
+  const host = "localhost";
+  const port = await getPort();
+  const callback = spec.createCallHTTPEndpoint(`http://${host}:${port}`);
+  const capturedInfo = await createTrackingServerAndListen(1, host, port, [
+    undefined,
+  ]);
+
+  const method = "GET";
+  const url = "/hello";
+  const result = await callback({ method, url });
+  c.deepEqual(capturedInfo, [
+    {
+      method,
+      url,
+      body: undefined,
+      headers: getExpectedServerIncomingHeaders(1, {
+        host,
+        port,
+        scheme: "http",
+        method,
+        path: url,
+      }),
+    },
+  ]);
+  c.deepEqual(result, {
+    body: undefined,
+    headers: getExpectedClientIncomingHeaders(1),
+  });
+});
+
 test("Verify that http1 non-pooling variant works", async (c) => {
   c.plan(2);
   const host = "localhost";

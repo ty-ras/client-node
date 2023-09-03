@@ -13,18 +13,19 @@ import * as errors from "./errors";
 import * as encoding from "./encoding";
 
 /**
- * This function will create a {@link dataFE.CallHTTPEndpoint} callback using Node-native HTTP1 and HTTP2 -related modules.
- * @param callerArgs The {@link HTTPEndpointCallerArgs}: either base URL string, or structured information about the scheme, hostname, etc of the backend.
- * @param callerArgs.commonPathPrefix Privately deconstructed variable.
- * @param callerArgs.allowProtoProperty Privately deconstructed variable.
+ * This function will create a {@link dataFE.CallHTTPEndpoint} callback using Node-native HTTP1 or HTTP2 -related modules.
+ * @param argsOrURL The {@link HTTPEndpointCallerArgs}: either base URL string (HTTP1 protocol will be used then), or structured information about the HTTP protocol version and associated settings.
  * @returns A {@link dataFE.CallHTTPEndpoint} callback which can be used to create instances of {@link dataFE.APICallFactoryBase}.
- * It will throw {@link errors.InvalidPathnameError} or {@link errors.Non2xxStatusCodeError} if invoked with wrong arguments, and also whatever the {@link URL} constructor might throw on invalid URLs.
+ * It will also throw whatever the {@link URL} constructor might throw, if passed invalid URL as `string` value.
+ * @see HTTPEndpointCallerArgs
  */
-export const createCallHTTPEndpoint = ({
-  commonPathPrefix,
-  allowProtoProperty,
-  ...callerArgs
-}: HTTPEndpointCallerArgs): dataFE.CallHTTPEndpoint => {
+export const createCallHTTPEndpoint = (
+  argsOrURL: HTTPEndpointCallerArgs,
+): dataFE.CallHTTPEndpoint => {
+  const { commonPathPrefix, allowProtoProperty, ...callerArgs } =
+    typeof argsOrURL === "string"
+      ? getOptionsFromURLString(argsOrURL)
+      : argsOrURL;
   const reviver = data.getJSONParseReviver(allowProtoProperty === true);
 
   return callerArgs.httpVersion === 2
@@ -42,8 +43,9 @@ export const createCallHTTPEndpoint = ({
  * This type is the argument of {@link createCallHTTPEndpoint}.
  * It can be either string, which is then interpreted as full URL.
  * Alternatively, it can be a structured object {@link HTTPEndpointCallerArgs}.
+ * @see HTTPEndpointCallerOptions
  */
-export type HTTPEndpointCallerArgs = HTTPEndpointCallerOptions;
+export type HTTPEndpointCallerArgs = HTTPEndpointCallerOptions | string;
 
 /**
  * These options used to create callback thru {@link createCallHTTPEndpoint} should be either {@link HTTPEndpointCallerOptions1} for HTTP1 protocol, or {@link HTTPEndpointCallerOptions2} for HTTP2 protocol.
@@ -158,6 +160,23 @@ export type HTTP1ConnectionAbstraction = http.Agent;
  */
 export type HTTP2ConnectionAbstraction = {
   [P in "request"]: http2.ClientHttp2Session[P];
+};
+
+const getOptionsFromURLString = (
+  urlString: string,
+): HTTPEndpointCallerOptions => {
+  const urlObject = new URL(urlString);
+  const port = urlObject.port;
+  const protocol = urlObject.protocol;
+  const pathname = urlObject.pathname;
+  const retVal: HTTPEndpointCallerOptions1WithoutAgent &
+    HTTPEndpointCallerOptionsBase = {
+    host: urlObject.hostname,
+    ...(port.length > 0 ? { port: parseInt(port) } : {}),
+    scheme: protocol.substring(0, protocol.length - 1),
+    ...(pathname.length > 1 ? { commonPathPrefix: pathname } : {}),
+  };
+  return retVal;
 };
 
 const constructSingletonPool = ({
