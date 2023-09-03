@@ -222,8 +222,6 @@ const callUsingHttp1 = (
       url,
       query,
     );
-    // If rejectUnauthorized is specified, we must construct separate https.Agent.
-    // Do it per request to avoid possible congestion.
     const agent = await acquire();
     try {
       const outgoingHeaders = getOutgoingHeaders(headers);
