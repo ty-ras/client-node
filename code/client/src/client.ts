@@ -1,5 +1,5 @@
 /**
- * @file This file contains function to create {@link dataFE.CallHTTPEndpoint} which will use `fetch` API to do the requests.
+ * @file This file contains function to create {@link dataFE.CallHTTPEndpoint} which will use Node HTTP1/2 modules to do the requests.
  */
 
 import * as data from "@ty-ras/data";
@@ -42,7 +42,7 @@ export const createCallHTTPEndpoint = (
 /**
  * This type is the argument of {@link createCallHTTPEndpoint}.
  * It can be either string, which is then interpreted as full URL.
- * Alternatively, it can be a structured object {@link HTTPEndpointCallerArgs}.
+ * Alternatively, it can be a structured object {@link HTTPEndpointCallerOptions}.
  * @see HTTPEndpointCallerOptions
  */
 export type HTTPEndpointCallerArgs = HTTPEndpointCallerOptions | string;
@@ -244,6 +244,11 @@ const callUsingHttp1 = (
     const agent = await acquire();
     try {
       const outgoingHeaders = getOutgoingHeaders(headers);
+      const bufferEncodingForWriting = getBufferEncoding(
+        encodingForWriting,
+        outgoingHeaders,
+      );
+      const bodyBuffer = getBodyBuffer(args, bufferEncodingForWriting);
       return await new Promise((resolve, reject) => {
         try {
           const writeable = http
@@ -253,7 +258,11 @@ const callUsingHttp1 = (
                 protocol: agent instanceof https.Agent ? "https:" : "http:",
                 method,
                 path: `${pathname}${search}`,
-                headers: outgoingHeaders,
+                headers: finalizeOutgoingHeaders(
+                  outgoingHeaders,
+                  bodyBuffer,
+                  bufferEncodingForWriting,
+                ),
               },
               (resp) => {
                 setReadableEncoding(resp, encodingForReading, resp.headers);
@@ -271,12 +280,7 @@ const callUsingHttp1 = (
               reject(err);
             });
 
-          writeBodyAndEnd(
-            writeable,
-            args,
-            encodingForWriting,
-            outgoingHeaders ?? {},
-          );
+          writeBodyAndEnd(writeable, bodyBuffer);
         } catch (e) {
           /* c8 ignore next 2 */
           reject(e);
@@ -314,11 +318,22 @@ const callUsingHttp2 = (
     const session = await acquire();
     try {
       const outgoingHeaders = {
-        ...getOutgoingHeaders(headers),
+        ...(getOutgoingHeaders(headers) ?? {}),
         [http2.constants.HTTP2_HEADER_METHOD]: method,
         [http2.constants.HTTP2_HEADER_PATH]: `${pathname}${search}`,
       };
-      const request = session.request(outgoingHeaders);
+      const bufferEncodingForWriting = getBufferEncoding(
+        encodingForWriting,
+        outgoingHeaders,
+      );
+      const bodyBuffer = getBodyBuffer(args, bufferEncodingForWriting);
+      const request = session.request(
+        finalizeOutgoingHeaders(
+          outgoingHeaders,
+          bodyBuffer,
+          bufferEncodingForWriting,
+        ),
+      );
 
       let incomingHeaders: http2.IncomingHttpHeaders = {};
       request.on("response", (hdrs) => {
@@ -348,7 +363,7 @@ const callUsingHttp2 = (
             reject(error);
           });
 
-          writeBodyAndEnd(request, args, encodingForWriting, outgoingHeaders);
+          writeBodyAndEnd(request, bodyBuffer);
         } catch (e) {
           /* c8 ignore next 2 */
           reject(e);
@@ -363,7 +378,35 @@ const callUsingHttp2 = (
 const getOutgoingHeaders = (headers: Record<string, unknown> | undefined) =>
   headers === undefined
     ? undefined
-    : data.transformEntries(headers, getOutgoingHeader);
+    : Object.fromEntries(
+        Object.entries(headers)
+          .filter(([, header]) => header !== undefined)
+          .map(
+            ([headerName, header]) =>
+              [headerName, getOutgoingHeader(header)] as const,
+          ),
+      );
+
+const finalizeOutgoingHeaders = (
+  headers: ReturnType<typeof getOutgoingHeaders>,
+  body: Buffer | undefined,
+  encoding: BufferEncoding,
+) =>
+  body === undefined
+    ? headers
+    : {
+        ...(headers ?? {}),
+        "content-type": `application/json; charset=${encoding}`,
+        "content-length": body.byteLength,
+      };
+
+const getBodyBuffer = (
+  args: { body?: unknown },
+  encodingForWriting: BufferEncoding,
+) =>
+  "body" in args
+    ? Buffer.from(JSON.stringify(args.body), encodingForWriting)
+    : undefined;
 
 const getOutgoingHeader = (header: unknown): http.OutgoingHttpHeader =>
   typeof header === "string" || typeof header === "number"
@@ -388,34 +431,20 @@ const constructURLObject = (
   };
 };
 
-const writeBodyAndEnd = <THeaders extends http.OutgoingHttpHeaders>(
+const getBufferEncoding = <THeaders extends http.OutgoingHttpHeaders>(
+  encodingInfo: encoding.HTTPEncodingFunctionality<THeaders>,
+  headers: THeaders | undefined,
+) =>
+  typeof encodingInfo === "function"
+    ? encodingInfo(headers ?? ({} as THeaders))
+    : encodingInfo;
+
+const writeBodyAndEnd = (
   writable: stream.Writable,
-  args: { body?: unknown },
-  encodingForWriting: encoding.HTTPEncodingFunctionality<THeaders>,
-  headers: THeaders,
+  bodyBuffer: Buffer | undefined,
 ) => {
-  const body = "body" in args ? JSON.stringify(args.body) : undefined;
-  if (body !== undefined) {
-    // Notice that despite what typings claim, the 'setDefaultEncoding' method will not be present on HTTP1 client request!
-    // Therefore, just use write overload, since we call write only once anyway.
-    try {
-      writable.write(
-        body,
-        typeof encodingForWriting === "function"
-          ? encodingForWriting(headers)
-          : encodingForWriting,
-      );
-    } catch (e) {
-      /* c8 ignore next 9 */
-      // Adding to C8 ignore because can't test since Node crashes...
-      // No idea why 'code' isn't exposed in typings...
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-      if (e instanceof Error && (e as any).code === "ERR_UNKNOWN_ENCODING") {
-        writable.write(body, encoding.DEFAULT_ENCODING);
-      } else {
-        throw e;
-      }
-    }
+  if (bodyBuffer) {
+    writable.write(bodyBuffer);
   }
   writable.end();
 };
@@ -459,11 +488,7 @@ const setReadableEncoding = <THeaders extends http.IncomingHttpHeaders>(
   headers: THeaders,
 ) => {
   try {
-    readable.setEncoding(
-      typeof encodingForReading === "function"
-        ? encodingForReading(headers)
-        : encodingForReading,
-    );
+    readable.setEncoding(getBufferEncoding(encodingForReading, headers));
   } catch {
     /* c8 ignore next 4 */
     // Can't test since Node crashes on this or when doing it for writable.
