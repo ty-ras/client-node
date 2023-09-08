@@ -545,6 +545,12 @@ const getExpectedServerIncomingHeaders = (
       ([k, v]) => [k.toLowerCase(), v] as const,
     ),
   ),
+  ...(hasBody
+    ? {
+        "content-type": "application/json; charset=utf8",
+        "content-length": "24",
+      }
+    : {}),
   ...(httpVersion === 2
     ? {
         [http2.constants.HTTP2_HEADER_AUTHORITY]: `${host}:${port}`,
@@ -556,7 +562,6 @@ const getExpectedServerIncomingHeaders = (
     : {
         connection: "close",
         host,
-        ...(hasBody ? { "transfer-encoding": "chunked" } : {}),
       }),
 });
 
@@ -571,7 +576,11 @@ const getExpectedClientIncomingHeaders = (
       }
     : {
         connection: "close",
-        ...(statusCode === 200 ? { "transfer-encoding": "chunked" } : {}),
+        ...(statusCode === 200
+          ? {
+              "transfer-encoding": "chunked",
+            }
+          : {}),
       };
 
 type HTTPVersion = 1 | 2;
