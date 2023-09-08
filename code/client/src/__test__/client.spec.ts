@@ -369,10 +369,49 @@ test(
 //   2,
 // );
 
+const testThatCustomRequestConfigIsCalled = async (
+  c: ExecutionContext,
+  httpVersion: HTTPVersion,
+) => {
+  c.plan(1);
+  let called: boolean = false;
+  const { callback } = await prepareForTest(httpVersion, [undefined], {
+    encodingInfo: undefined,
+    processConfig: () => {
+      called = true;
+    },
+  });
+
+  const method = "GET";
+  await callback({
+    method,
+    url: "/hello/?injected-query-#-and-fragment/",
+  });
+  c.deepEqual(called, true);
+};
+
+test(
+  "Test that HTTP1 invokes custom request config",
+  testThatCustomRequestConfigIsCalled,
+  1,
+);
+test(
+  "Test that HTTP2 invokes custom request config",
+  testThatCustomRequestConfigIsCalled,
+  2,
+);
+
 const prepareForTest = async (
   httpVersion: HTTPVersion,
   responses: PreparedServerRespones = [undefined],
-  encodingInfo: EncodingInfo = undefined,
+  opts: {
+    encodingInfo: EncodingInfo;
+    processConfig:
+      | spec.HTTPRequestConfigProcessor<
+          spec.HTTP1RequestConfig | spec.HTTP2RequestConfig
+        >
+      | undefined;
+  } = { encodingInfo: undefined, processConfig: undefined },
 ) => {
   const host = "localhost";
   const port = await getPort();
@@ -387,7 +426,13 @@ const prepareForTest = async (
     host,
     port,
     capturedInfo,
-    ...createCallback(httpVersion, host, port, encodingInfo),
+    ...createCallback(
+      httpVersion,
+      host,
+      port,
+      opts.encodingInfo,
+      opts.processConfig,
+    ),
   };
 };
 
@@ -396,6 +441,11 @@ const createCallback = (
   host: string,
   port: number,
   encodingInfo: EncodingInfo,
+  processRequestConfig:
+    | spec.HTTPRequestConfigProcessor<
+        spec.HTTP1RequestConfig | spec.HTTP2RequestConfig
+      >
+    | undefined,
 ) => {
   const acquired: Array<
     spec.HTTP2ConnectionAbstraction | spec.HTTP1ConnectionAbstraction
@@ -407,6 +457,7 @@ const createCallback = (
     httpVersion === 2
       ? {
           ...(encodingInfo ?? {}),
+          ...(processRequestConfig ? { processRequestConfig } : {}),
           httpVersion,
           acquire: () => {
             const connection = http2.connect(`http://${host}:${port}`);
@@ -427,6 +478,7 @@ const createCallback = (
         }
       : {
           ...(encodingInfo ?? {}),
+          ...(processRequestConfig ? { processRequestConfig } : {}),
           httpVersion,
           acquire: () => {
             const agent = new http.Agent({ host, port });
