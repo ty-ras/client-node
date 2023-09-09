@@ -599,7 +599,7 @@ const getExpectedServerIncomingHeaders = (
   ),
   ...(hasBody
     ? {
-        "content-type": "application/json; charset=utf8",
+        "content-type": "application/json; charset=utf-8",
         "content-length": "24",
       }
     : {}),
