@@ -402,10 +402,10 @@
   resolved "https://registry.yarnpkg.com/@tsconfig/node16/-/node16-1.0.4.tgz#0b92dcc0cc1c81f6f306a381f28e31b1a56536e9"
   integrity sha512-vxhUy4J8lyeyinH7Azl1pdd43GJhZH/tP2weN8TntQblOY+A0XbT8DJk1/oCPuOOyg/Ja757rG0CgHcWC8OfMA==
 
-"@ty-ras/data-frontend@^2.0.1":
-  version "2.0.1"
-  resolved "https://registry.yarnpkg.com/@ty-ras/data-frontend/-/data-frontend-2.0.1.tgz#0181d5e2785b70fd0c7ad8585308bac8ad2235b3"
-  integrity sha512-Ff9DngCLaGcVd4OzlCQ0gMJ0Qc2A8Emv3ysZcuFiivxSwCaHiE8QCLRg7iHuiDGWZj5fPg6k9CzAJlIptGCjYQ==
+"@ty-ras/data-frontend@^2.1.1":
+  version "2.1.1"
+  resolved "https://registry.yarnpkg.com/@ty-ras/data-frontend/-/data-frontend-2.1.1.tgz#0975e50eec3e04368b6e46ac42f321f21406112f"
+  integrity sha512-MBJYz7jxgL6sb5TkrT9PEWKSciGG71hMMid7TbGmbTBDj56ACdSXwPLlMSGYfpqoZr9IyO7+WSaI3tP9DbZnng==
   dependencies:
     "@ty-ras/data" "^2.1.0"
 

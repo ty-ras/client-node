@@ -4,13 +4,13 @@
 
 import test, { type ExecutionContext } from "ava";
 import getPort from "@ava/get-port";
+import * as dataFE from "@ty-ras/data-frontend";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import type * as stream from "node:stream";
 import type * as net from "node:net";
 
 import * as spec from "../client";
-import * as errors from "../errors";
 import * as encoding from "../encoding";
 
 test("Verify that http1 raw string variant works", async (c) => {
@@ -295,7 +295,7 @@ const testNon2xxStatusCode = async (
   await c.throwsAsync(
     async () => await callback({ method: "GET", url: "/hello" }),
     {
-      instanceOf: errors.Non2xxStatusCodeError,
+      instanceOf: dataFE.Non2xxStatusCodeError,
       message: `Status code ${statusCode} was returned.`,
     },
   );

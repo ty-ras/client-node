@@ -3,13 +3,11 @@
  */
 
 import * as data from "@ty-ras/data";
-import type * as dataFE from "@ty-ras/data-frontend";
+import * as dataFE from "@ty-ras/data-frontend";
 import * as http from "node:http";
 import * as https from "node:https";
 import * as http2 from "node:http2";
-import * as url from "node:url";
 import type * as stream from "node:stream";
-import * as errors from "./errors";
 import * as encoding from "./encoding";
 
 /**
@@ -247,17 +245,6 @@ const constructSingletonPool = ({
   };
 };
 
-const getURLSearchParams = (query: Record<string, unknown>) =>
-  new url.URLSearchParams(
-    Object.entries(query)
-      .filter(([, value]) => value !== undefined)
-      .flatMap<[string, string]>(([qKey, qValue]) =>
-        Array.isArray(qValue)
-          ? qValue.map<[string, string]>((value) => [qKey, `${value}`])
-          : [[qKey, `${qValue}`]],
-      ),
-  ).toString();
-
 const callUsingHttp1 = (
   {
     acquire,
@@ -287,7 +274,7 @@ const callUsingHttp1 = (
     );
     const agent = await acquire();
     try {
-      const outgoingHeaders = getOutgoingHeaders(headers);
+      const outgoingHeaders = dataFE.getOutgoingHeaders(headers);
       const bufferEncodingForWriting = getBufferEncoding(
         encodingForWriting,
         outgoingHeaders,
@@ -365,7 +352,7 @@ const callUsingHttp2 = (
     const session = await acquire();
     try {
       const outgoingHeaders = {
-        ...(getOutgoingHeaders(headers) ?? {}),
+        ...(dataFE.getOutgoingHeaders(headers) ?? {}),
         [http2.constants.HTTP2_HEADER_METHOD]: method,
         [http2.constants.HTTP2_HEADER_PATH]: `${pathname}${search}`,
       };
@@ -425,20 +412,8 @@ const callUsingHttp2 = (
   };
 };
 
-const getOutgoingHeaders = (headers: Record<string, unknown> | undefined) =>
-  headers === undefined
-    ? undefined
-    : Object.fromEntries(
-        Object.entries(headers)
-          .filter(([, header]) => header !== undefined)
-          .map(
-            ([headerName, header]) =>
-              [headerName, getOutgoingHeader(header)] as const,
-          ),
-      );
-
 const finalizeOutgoingHeaders = <
-  THeaders extends ReturnType<typeof getOutgoingHeaders>,
+  THeaders extends Record<string, dataFE.OutgoingHttpHeader> | undefined,
 >(
   headers: THeaders,
   body: Buffer | undefined,
@@ -460,23 +435,13 @@ const getBodyBuffer = (
     ? Buffer.from(JSON.stringify(args.body), encodingForWriting)
     : undefined;
 
-const getOutgoingHeader = (header: unknown): http.OutgoingHttpHeader =>
-  typeof header === "string" || typeof header === "number"
-    ? header
-    : Array.isArray(header)
-    ? header.filter((v) => v !== undefined).map((v) => `${v}`)
-    : `${header}`;
-
 const constructURLObject = (
   commonPathPrefix: string,
   path: string,
   query: Record<string, unknown> | undefined,
 ): { pathname: string; search: string } => {
-  const pathname = `${commonPathPrefix}${path}`.replaceAll(
-    /\?|#/g,
-    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
-  );
-  const search = getURLSearchParams(query ?? {});
+  const pathname = dataFE.ensurePathname(`${commonPathPrefix}${path}`);
+  const search = dataFE.getURLSearchParams(query ?? {}).toString();
   return {
     pathname: pathname,
     search: search.length > 0 ? `?${search}` : "",
@@ -522,7 +487,7 @@ const handleResolvingOfResponse = (
   source.on("end", () => {
     const statusCode = getStatusCode();
     if (statusCode === undefined || statusCode < 200 || statusCode >= 300) {
-      reject(new errors.Non2xxStatusCodeError(statusCode ?? -1));
+      reject(new dataFE.Non2xxStatusCodeError(statusCode ?? -1));
     } else {
       resolve({
         headers: typeof getHeaders === "function" ? getHeaders() : getHeaders,
