@@ -4,5 +4,3 @@
 
 export * from "./client";
 export * from "./encoding";
-export type { Non2xxStatusCodeError } from "./errors";
-export { isNon2xxStatusCodeError } from "./errors";

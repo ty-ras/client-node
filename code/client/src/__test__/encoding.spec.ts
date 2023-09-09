@@ -8,7 +8,7 @@ import type * as http from "node:http";
 
 test("Test that default encoding is what is expected", (c) => {
   c.plan(1);
-  c.deepEqual(spec.DEFAULT_ENCODING, "utf8");
+  c.deepEqual(spec.DEFAULT_ENCODING, "utf-8");
 });
 
 test("Test that default encoding options find the encoding from content-type header", (c) => {

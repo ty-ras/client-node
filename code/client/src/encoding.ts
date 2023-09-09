@@ -51,7 +51,7 @@ export type HTTPEncodingFunctionality<THeaders> =
 /**
  * This is the default fallback encoding used by {@link DEFAULT_HTTP_ENCODING_OPTIONS}: `utf8`.
  */
-export const DEFAULT_ENCODING = "utf8" as const satisfies BufferEncoding;
+export const DEFAULT_ENCODING = "utf-8" as const satisfies BufferEncoding;
 
 const tryGetEncoding = (headers: Record<string, unknown>): BufferEncoding => {
   let encoding: BufferEncoding | undefined;

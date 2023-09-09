@@ -4,13 +4,13 @@
 
 import test, { type ExecutionContext } from "ava";
 import getPort from "@ava/get-port";
+import * as dataFE from "@ty-ras/data-frontend";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import type * as stream from "node:stream";
 import type * as net from "node:net";
 
 import * as spec from "../client";
-import * as errors from "../errors";
 import * as encoding from "../encoding";
 
 test("Verify that http1 raw string variant works", async (c) => {
@@ -295,7 +295,7 @@ const testNon2xxStatusCode = async (
   await c.throwsAsync(
     async () => await callback({ method: "GET", url: "/hello" }),
     {
-      instanceOf: errors.Non2xxStatusCodeError,
+      instanceOf: dataFE.Non2xxStatusCodeError,
       message: `Status code ${statusCode} was returned.`,
     },
   );
@@ -369,10 +369,49 @@ test(
 //   2,
 // );
 
+const testThatCustomRequestConfigIsCalled = async (
+  c: ExecutionContext,
+  httpVersion: HTTPVersion,
+) => {
+  c.plan(1);
+  let called: boolean = false;
+  const { callback } = await prepareForTest(httpVersion, [undefined], {
+    encodingInfo: undefined,
+    processConfig: () => {
+      called = true;
+    },
+  });
+
+  const method = "GET";
+  await callback({
+    method,
+    url: "/hello/?injected-query-#-and-fragment/",
+  });
+  c.deepEqual(called, true);
+};
+
+test(
+  "Test that HTTP1 invokes custom request config",
+  testThatCustomRequestConfigIsCalled,
+  1,
+);
+test(
+  "Test that HTTP2 invokes custom request config",
+  testThatCustomRequestConfigIsCalled,
+  2,
+);
+
 const prepareForTest = async (
   httpVersion: HTTPVersion,
   responses: PreparedServerRespones = [undefined],
-  encodingInfo: EncodingInfo = undefined,
+  opts: {
+    encodingInfo: EncodingInfo;
+    processConfig:
+      | spec.HTTPRequestConfigProcessor<
+          spec.HTTP1RequestConfig | spec.HTTP2RequestConfig
+        >
+      | undefined;
+  } = { encodingInfo: undefined, processConfig: undefined },
 ) => {
   const host = "localhost";
   const port = await getPort();
@@ -387,7 +426,13 @@ const prepareForTest = async (
     host,
     port,
     capturedInfo,
-    ...createCallback(httpVersion, host, port, encodingInfo),
+    ...createCallback(
+      httpVersion,
+      host,
+      port,
+      opts.encodingInfo,
+      opts.processConfig,
+    ),
   };
 };
 
@@ -396,6 +441,11 @@ const createCallback = (
   host: string,
   port: number,
   encodingInfo: EncodingInfo,
+  processRequestConfig:
+    | spec.HTTPRequestConfigProcessor<
+        spec.HTTP1RequestConfig | spec.HTTP2RequestConfig
+      >
+    | undefined,
 ) => {
   const acquired: Array<
     spec.HTTP2ConnectionAbstraction | spec.HTTP1ConnectionAbstraction
@@ -407,6 +457,7 @@ const createCallback = (
     httpVersion === 2
       ? {
           ...(encodingInfo ?? {}),
+          ...(processRequestConfig ? { processRequestConfig } : {}),
           httpVersion,
           acquire: () => {
             const connection = http2.connect(`http://${host}:${port}`);
@@ -427,6 +478,7 @@ const createCallback = (
         }
       : {
           ...(encodingInfo ?? {}),
+          ...(processRequestConfig ? { processRequestConfig } : {}),
           httpVersion,
           acquire: () => {
             const agent = new http.Agent({ host, port });
@@ -545,6 +597,12 @@ const getExpectedServerIncomingHeaders = (
       ([k, v]) => [k.toLowerCase(), v] as const,
     ),
   ),
+  ...(hasBody
+    ? {
+        "content-type": "application/json; charset=utf-8",
+        "content-length": "24",
+      }
+    : {}),
   ...(httpVersion === 2
     ? {
         [http2.constants.HTTP2_HEADER_AUTHORITY]: `${host}:${port}`,
@@ -556,7 +614,6 @@ const getExpectedServerIncomingHeaders = (
     : {
         connection: "close",
         host,
-        ...(hasBody ? { "transfer-encoding": "chunked" } : {}),
       }),
 });
 
@@ -571,7 +628,11 @@ const getExpectedClientIncomingHeaders = (
       }
     : {
         connection: "close",
-        ...(statusCode === 200 ? { "transfer-encoding": "chunked" } : {}),
+        ...(statusCode === 200
+          ? {
+              "transfer-encoding": "chunked",
+            }
+          : {}),
       };
 
 type HTTPVersion = 1 | 2;
