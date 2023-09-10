@@ -407,7 +407,7 @@ const prepareForTest = async (
   opts: {
     encodingInfo: EncodingInfo;
     processConfig:
-      | spec.HTTPRequestConfigProcessor<
+      | dataFE.HTTPRequestConfigProcessor<
           spec.HTTP1RequestConfig | spec.HTTP2RequestConfig
         >
       | undefined;
@@ -442,7 +442,7 @@ const createCallback = (
   port: number,
   encodingInfo: EncodingInfo,
   processRequestConfig:
-    | spec.HTTPRequestConfigProcessor<
+    | dataFE.HTTPRequestConfigProcessor<
         spec.HTTP1RequestConfig | spec.HTTP2RequestConfig
       >
     | undefined,
